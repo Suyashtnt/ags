@@ -1,92 +1,108 @@
-{ lib
-, stdenv
-, buildNpmPackage
-, fetchFromGitLab
-, nodePackages
-, meson
-, pkg-config
-, ninja
-, gobject-introspection
-, gtk3
-, libpulseaudio
-, gjs
-, python3
-, wrapGAppsHook
-, upower
-, gnome
-, gtk-layer-shell
-, glib-networking
-, networkmanager
-, libdbusmenu-gtk3
-, gvfs
-, extraPackages ? []
-}:
-
-let
-  gvc-src = fetchFromGitLab {
-    domain = "gitlab.gnome.org";
-    owner = "GNOME";
-    repo = "libgnome-volume-control";
-    rev = "8e7a5a4c3e51007ce6579292642517e3d3eb9c50";
-    sha256 = "sha256-FosJwgTCp6/EI6WVbJhPisokRBA6oT0eo7d+Ya7fFX8=";
-  };
-in
-stdenv.mkDerivation {
+{
+  symlinkJoin,
+  astal3,
+  astal4,
+  gtk4-layer-shell,
+  astal-io,
+  astal-gjs,
+  lib,
+  buildGoModule,
+  wrapGAppsHook,
+  gobject-introspection,
+  glib,
+  gjs,
+  nodejs,
+  dart-sass,
+  blueprint-compiler,
+  installShellFiles,
+  extraPackages ? [],
+}: let
+  inherit (builtins) replaceStrings readFile;
+  version = replaceStrings ["\n"] [""] (readFile ../version);
   pname = "ags";
-  version = "1.5.5";
 
-  src = buildNpmPackage {
-    name = "ags";
-    src = ../.;
+  buildInputs =
+    extraPackages
+    ++ [
+      glib
+      astal-io
+      astal3
+      astal4
+      gobject-introspection # needed for type generation
+    ];
 
-    dontBuild = true;
-
-    npmDepsHash = "sha256-y5kIMnZSU4IV2oCitcXFc6y7oVJxnLCzkA1lvSOrc/k=";
-
-    installPhase = ''
-      mkdir $out
-      cp -r * $out
-    '';
-  };
-
-  prePatch = ''
-    mkdir -p ./subprojects/gvc
-    cp -r ${gvc-src}/* ./subprojects/gvc
-  '';
-
-  postPatch = ''
-    chmod +x meson_post_install.py
-    patchShebangs meson_post_install.py
-  '';
-
-  nativeBuildInputs = [
-    pkg-config
-    meson
-    ninja
-    nodePackages.typescript
-    python3
-    wrapGAppsHook
-    gobject-introspection
+  bins = [
+    gjs
+    nodejs
+    dart-sass
+    blueprint-compiler
+    astal-io # FIXME: should not be needed after the astal commands are properly implemented using dbus in astal.go
   ];
 
-  buildInputs = [
-    gjs
-    gtk3
-    libpulseaudio
-    upower
-    gnome.gnome-bluetooth
-    gtk-layer-shell
-    glib-networking
-    networkmanager
-    libdbusmenu-gtk3
-    gvfs
-  ] ++ extraPackages;
+  girDirs = let
+    # gir files are usually in `dev` output.
+    # `propagatedBuildInputs` are also available in the gjs runtime
+    # so we also want to generate types for these.
+    depsOf = pkg:
+      [(pkg.dev or pkg)]
+      ++ (map depsOf (pkg.propagatedBuildInputs or []));
+  in
+    symlinkJoin {
+      name = "gir-dirs";
+      paths = lib.flatten (map depsOf buildInputs);
+    };
+in
+  buildGoModule {
+    inherit pname version buildInputs;
 
-  meta = with lib; {
-    description = "A customizable and extensible shell";
-    homepage = "https://github.com/Aylur/ags";
-    platforms = [ "x86_64-linux" "aarch64-linux" ];
-    license = licenses.gpl3;
-    meta.maintainers = [lib.maintainers.Aylur];
-  };
-}
+    src = lib.fileset.toSource {
+      root = ../.;
+      fileset = lib.fileset.unions [
+        ../go.mod
+        ../go.sum
+        ../version
+
+        ../main.go
+        ../cmd
+        ../lib
+        ../data
+      ];
+    };
+
+    vendorHash = "sha256-Pw6UNT5YkDVz4HcH7b5LfOg+K3ohrBGPGB9wYGAQ9F4=";
+    proxyVendor = true;
+
+    nativeBuildInputs = [
+      wrapGAppsHook
+      gobject-introspection
+      installShellFiles
+    ];
+
+    preFixup = ''
+      gappsWrapperArgs+=(
+        --prefix EXTRA_GIR_DIRS : "${girDirs}/share/gir-1.0"
+        --prefix PATH : "${lib.makeBinPath (bins ++ extraPackages)}"
+      )
+    '';
+
+    postInstall = ''
+      installShellCompletion \
+        --cmd ags \
+        --bash <($out/bin/ags completion bash) \
+        --fish <($out/bin/ags completion fish) \
+        --zsh <($out/bin/ags completion zsh)
+    '';
+
+    ldflags = [
+      "-X main.astalGjs=${astal-gjs}"
+      "-X main.gtk4LayerShell=${gtk4-layer-shell}/lib/libgtk4-layer-shell.so"
+    ];
+
+    meta = {
+      homepage = "https://github.com/Aylur/ags";
+      description = "Scaffolding CLI tool for Astal+TypeScript projects";
+      license = lib.licenses.gpl3Plus;
+      mainProgram = "ags";
+      platforms = lib.platforms.linux;
+    };
+  }
